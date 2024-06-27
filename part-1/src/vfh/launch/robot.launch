@@ -1,0 +1,36 @@
+<launch>
+    <arg name="model" default="$(env TURTLEBOT3_MODEL)" doc="model type [burger, waffle, waffle_pi]" />
+
+    <arg name="x_pos" value="0.0" />
+    <arg name="y_pos" value="0.0" />
+    <arg name="z_pos" value="0.0" />
+
+    <arg name="goal_x_pos" value="0.0" />
+    <arg name="goal_y_pos" value="0.0" />
+
+    <node pkg="vfh" type="vfh.py" name="vfh" output="screen">
+        <param name="x_pos" value="$(arg x_pos)" />
+        <param name="y_pos" value="$(arg y_pos)" />
+        <param name="z_pos" value="$(arg z_pos)" />
+
+        <param name="goal_x_pos" value="$(arg goal_x_pos)" />
+        <param name="goal_y_pos" value="$(arg goal_y_pos)" />
+    </node>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="world_name" value="$(find vfh)/path_to_goal.world" />
+        <arg name="paused" value="false" />
+        <arg name="use_sim_time" value="true" />
+        <arg name="gui" value="true" />
+        <arg name="headless" value="false" />
+        <arg name="debug" value="false" />
+    </include>
+
+    <param name="robot_description"
+        command="$(find xacro)/xacro --inorder $(find turtlebot3_description)/urdf/turtlebot3_$(arg model).urdf.xacro" />
+
+    <node pkg="gazebo_ros" type="spawn_model" name="spawn_urdf"
+        args="-urdf -model turtlebot3_$(arg model) -x $(arg x_pos) -y $(arg y_pos) -z $(arg z_pos) -param robot_description" />
+
+    <include file="$(find turtlebot3_gazebo)/launch/turtlebot3_gazebo_rviz.launch" />
+</launch>
