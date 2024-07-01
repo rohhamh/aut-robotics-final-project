@@ -15,26 +15,27 @@ from tf import transformations
 
 class VFH:
     def __init__(self):
-        rospy.init_node("wall_follower", anonymous=False)  # type: ignore
+        rospy.init_node("vfh", anonymous=False)  # type: ignore
 
         self.heading = 0
         self.path = Path()
 
         self.goal = Point()
-        self.goal.x = -7
-        self.goal.y = -13
+        self.goal.x = 7
+        self.goal.y = 13
 
-        self.err_coeff = 0.05
-
-        self.dt = 0.005
+        self.dt = 0.05
         rate = 1 / self.dt
 
-        self.a = 1
-        self.b = 0.25
+        self.angular_speed_pid = PID(1, 0, 0, self.dt)
+        self.linear_velocity = 0.15
+
+        self.a = 2
+        self.b = .55
         self.alpha = 5  # number of degrees that each sector occupies
-        self.threshold = 1
+        self.threshold = 3
         self.smoothing_proximity = 2
-        self.smax = 2
+        self.smax = 6
 
         self.sectors: list[float] = [0] * (360 // self.alpha)
 
@@ -92,59 +93,129 @@ class VFH:
         return [smooth_index(idx) for idx, _ in enumerate(arr)]
 
     def update_sectors(self, laser_message: LaserScan) -> Iterable[float]:
-        chunk_size = len(laser_message.ranges) // self.alpha
         ranges = map(
             lambda r: self.get_cell_value(prob=1, distance=r), laser_message.ranges
         )
+        ranges = list(map(lambda r: r if r >= 0 else 0, ranges))
+        chunk_count = len(laser_message.ranges) // self.alpha
         sectors: map[float] = map(
             lambda range_group: np.sum(range_group),
-            np.array_split(list(ranges), chunk_size),
+            np.array_split(ranges, chunk_count),
         )
         self.sectors = self.smooth_array(list(sectors), self.smoothing_proximity)
         return self.sectors
 
     def get_next_direction(self):
-        sectors_extrema = argrelextrema(self.sectors, lambda x, _: x < self.threshold)
-        valleys = []
+        sectors_extrema = argrelextrema(
+            np.array(self.sectors), lambda x, _: x < self.threshold
+        )[0]
+        valleys: list[set[int]] = []
         current_valley_buffer = set()
-        for idx in range(len(sectors_extrema)):
+        for idx in range(-len(sectors_extrema) + 1, len(sectors_extrema)):
             if sectors_extrema[idx] - sectors_extrema[idx - 1] == 1:
                 current_valley_buffer.add(sectors_extrema[idx - 1])
                 current_valley_buffer.add(sectors_extrema[idx])
             else:
-                if len(current_valley_buffer) > self.smax:
-                    valleys.append(list(current_valley_buffer))
+                valleys.append(current_valley_buffer)
                 current_valley_buffer = set()
-        rotation_degrees = math.degrees(self.get_rotation(self.goal, self.heading))
-        rotation_sector = rotation_degrees // self.alpha
-        candidate_sectors = []
-        for valley_idx, valley in enumerate(valleys):
-            valley_sectors_distance_to_target = np.array(valley) - rotation_sector
+
+        def revolving_sort(arr, mod):
+            diff = [
+                (i, abs(x - mod) if x > mod / 2 else x)
+                for i, x in enumerate(np.mod(arr, mod))
+            ]
+            sorted_diff = sorted(diff, key=lambda x: x[1])
+            return sorted_diff
+
+        def mergable(seta: set, setb: set):
+            l = revolving_sort(list(seta.union(setb)), len(self.sectors))
+            for idx in range(1, len(l)):
+                prev, curr = l[idx - 1][1], l[idx][1]
+                if abs(curr - prev) > 1:
+                    return False
+            return True
+
+        candidate_valleys: list[set[int]] = []
+        for valleyi in valleys:
+            for valleyj in valleys:
+                if len(valleyi.intersection(valleyj)) > 0 or mergable(valleyi, valleyj):
+                    candidate_valleys.append(valleyi.union(valleyj))
+        for valleyi in valleys:
+            for valleyj in valleys:
+                if len(valleyi.intersection(valleyj)) > 0 or mergable(valleyi, valleyj):
+                    candidate_valleys.append(valleyi.union(valleyj))
+
+        candidates_to_remove = []
+        for i, valleyi in enumerate(candidate_valleys):
+            if len(valleyi) < self.smax:
+                candidates_to_remove.append(valleyi)
+                continue
+            for j, valleyj in enumerate(candidate_valleys[:i]):
+                if valleyi.issuperset(valleyj) and valleyi.difference(valleyj):
+                    candidates_to_remove.append(valleyj)
+                    continue
+        for to_remove in candidates_to_remove:
+            try: candidate_valleys.remove(to_remove)
+            except: pass
+
+        unique = []
+        for valley in candidate_valleys:
+            if valley not in unique:
+                unique.append(valley)
+        candidate_valleys = unique
+
+        goal_degrees = math.degrees(self.get_rotation(self.goal, self.heading))
+        if goal_degrees < 0:
+            goal_degrees += 360
+        goal_sector = goal_degrees // self.alpha
+        candidate_sectors: list[tuple[int, np.intp, float]] = []
+        for valley_idx, valley in enumerate(candidate_valleys):
+            valley_sectors_distance_to_target = abs(
+                np.array(list(valley)) - goal_sector
+            )
             min_sector_distance_idx = np.argmin(
-                np.abs(valley_sectors_distance_to_target)
+                np.mod(valley_sectors_distance_to_target, len(self.sectors))
             )
             candidate_sectors.append(
                 (
                     valley_idx,
                     min_sector_distance_idx,
-                    np.abs(valley_sectors_distance_to_target[min_sector_distance_idx]),
+                    np.mod(
+                        valley_sectors_distance_to_target[min_sector_distance_idx],
+                        len(self.sectors),
+                    ),
                 )
             )
+        if not candidate_sectors:
+            return 0
         target_valley_idx, target_sector_idx_in_valley, _ = min(
             candidate_sectors, key=lambda c: c[2]
         )
-        target_valley = valleys[target_valley_idx]
-        theta_sector_range = (
+        selected_valley = list(candidate_valleys[target_valley_idx])
+        theta_sector_idx_range = (
             range(
-                target_sector_idx_in_valley - self.smax, target_sector_idx_in_valley + 1
+                target_sector_idx_in_valley - self.smax + 1,
+                target_sector_idx_in_valley + 1,
             )
-            if target_sector_idx_in_valley + self.smax > len(target_valley)
+            if target_sector_idx_in_valley + self.smax
+            >= len(selected_valley)  # gt or gteq?
             else range(
-                target_sector_idx_in_valley, target_sector_idx_in_valley + self.smax + 1
+                target_sector_idx_in_valley,
+                target_sector_idx_in_valley + self.smax,  # + 1?
             )
         )
-        return ((theta_sector_range[0] + theta_sector_range[-1]) / 2) * self.alpha
-    
+        theta_sector_range = list(map(lambda idx: selected_valley[idx], theta_sector_idx_range))  # type: ignore
+        diff = [
+            (i, abs(x - len(self.sectors)) if x > len(self.sectors) / 2 else x)
+            for i, x in enumerate(np.mod(theta_sector_range, len(self.sectors)))
+        ]
+        sorted_diff = sorted(diff, key=lambda x: x[1])
+        theta_median = theta_sector_range[sorted_diff[len(sorted_diff) // 2][0]]
+        rospy.loginfo(
+            f"\nself.heading {math.degrees(self.heading)}\ngoal_degrees {goal_degrees}\ngoal_sector {goal_sector}\nvalleys{valleys}\ncandidate_valleys {candidate_valleys}\ncandidate_sectors {candidate_sectors}\nselected_valley {selected_valley}\ntarget_sector {selected_valley[target_sector_idx_in_valley]}\ntheta_median {theta_median}\n"  # \nlaser_data {self.laser_data.ranges}"
+        )
+        return theta_median
+
     def run(self):
         rospy.loginfo("starting robot...")
         while not rospy.is_shutdown():
@@ -152,10 +223,39 @@ class VFH:
             self.update_sectors(self.laser_data)
             next_dir_degrees = self.get_next_direction()
             error = math.radians(next_dir_degrees)
+            if error > math.pi:
+                error -= 2 * math.pi
+            elif error < -math.pi:
+                error += 2 * math.pi
+
             twist = Twist()
-            twist.angular.z = self.err_coeff * error
-            self.cmd_vel.publish()
+            twist.linear.x = self.linear_velocity * (math.pi - abs(error)) / math.pi
+            twist.angular.z = self.angular_speed_pid.apply(error)
+            rospy.loginfo(f"error {error} angular.z {twist.angular.z}")
+            self.cmd_vel.publish(twist)
             self.r.sleep()
+
+
+class PID:
+    def __init__(self, k_p: float, k_i: float, k_d: float, dt: float):
+        self.k_p = k_p
+        self.k_i = k_i
+        self.k_d = k_d
+
+        self.dt = dt
+
+        self.prev_theta_error = 0
+        self.sum_i_theta = 0
+
+    def apply(self, err: float):
+        self.sum_i_theta += err * self.dt
+
+        P = self.k_p * err
+        I = self.k_i * self.sum_i_theta
+        D = self.k_d * (err - self.prev_theta_error)
+
+        self.prev_theta_error = err
+        return P + I + D
 
 
 if __name__ == "__main__":

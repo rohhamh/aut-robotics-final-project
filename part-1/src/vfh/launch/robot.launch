@@ -1,12 +1,12 @@
 <launch>
     <arg name="model" default="$(env TURTLEBOT3_MODEL)" doc="model type [burger, waffle, waffle_pi]" />
 
-    <arg name="x_pos" value="0.0" />
+    <arg name="x_pos" value="1.0" />
     <arg name="y_pos" value="0.0" />
     <arg name="z_pos" value="0.0" />
 
-    <arg name="goal_x_pos" value="0.0" />
-    <arg name="goal_y_pos" value="0.0" />
+    <arg name="goal_x_pos" value="-7.0" />
+    <arg name="goal_y_pos" value="13.0" />
 
     <node pkg="vfh" type="vfh.py" name="vfh" output="screen">
         <param name="x_pos" value="$(arg x_pos)" />
@@ -18,7 +18,7 @@
     </node>
 
     <include file="$(find gazebo_ros)/launch/empty_world.launch">
-        <arg name="world_name" value="$(find vfh)/path_to_goal.world" />
+        <arg name="world_name" value="$(find vfh)/worlds/updated_maze.world" />
         <arg name="paused" value="false" />
         <arg name="use_sim_time" value="true" />
         <arg name="gui" value="true" />
