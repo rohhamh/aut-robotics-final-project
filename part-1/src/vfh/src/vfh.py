@@ -23,17 +23,18 @@ class VFH:
         self.goal = Point()
         self.goal.x = 7
         self.goal.y = 13
+        self.goals = [Point(4, 0), ]
 
-        self.dt = 0.05
+        self.dt = 0.005
         rate = 1 / self.dt
 
         self.angular_speed_pid = PID(1, 0, 0, self.dt)
         self.linear_velocity = 0.15
 
         self.a = 2
-        self.b = .55
+        self.b = 0.55
         self.alpha = 5  # number of degrees that each sector occupies
-        self.threshold = 3
+        self.threshold = 1
         self.smoothing_proximity = 2
         self.smax = 6
 
@@ -105,64 +106,76 @@ class VFH:
         self.sectors = self.smooth_array(list(sectors), self.smoothing_proximity)
         return self.sectors
 
-    def get_next_direction(self):
-        sectors_extrema = argrelextrema(
-            np.array(self.sectors), lambda x, _: x < self.threshold
-        )[0]
+    @staticmethod
+    def revolving_sort(arr, mod):
+        diff = [
+            (i, abs(x - mod) if x > mod / 2 else x)
+            for i, x in enumerate(np.mod(arr, mod))
+        ]
+        sorted_diff = sorted(diff, key=lambda x: x[1])
+        return sorted_diff
+
+    @staticmethod
+    def mergable(seta: set, setb: set, mod: int):
+        l = VFH.revolving_sort(list(seta.union(setb)), mod)
+        for idx in range(1, len(l)):
+            prev, curr = l[idx - 1][1], l[idx][1]
+            if abs(curr - prev) > 1:
+                return False
+        return True
+
+    @staticmethod
+    def merge_mod_extremas(extremas: np.ndarray, mod: int):
         valleys: list[set[int]] = []
         current_valley_buffer = set()
-        for idx in range(-len(sectors_extrema) + 1, len(sectors_extrema)):
-            if sectors_extrema[idx] - sectors_extrema[idx - 1] == 1:
-                current_valley_buffer.add(sectors_extrema[idx - 1])
-                current_valley_buffer.add(sectors_extrema[idx])
+        for idx in range(-len(extremas) + 1, len(extremas)):
+            if extremas[idx] - extremas[idx - 1] == 1:
+                current_valley_buffer.add(extremas[idx - 1])
+                current_valley_buffer.add(extremas[idx])
             else:
                 valleys.append(current_valley_buffer)
                 current_valley_buffer = set()
-
-        def revolving_sort(arr, mod):
-            diff = [
-                (i, abs(x - mod) if x > mod / 2 else x)
-                for i, x in enumerate(np.mod(arr, mod))
-            ]
-            sorted_diff = sorted(diff, key=lambda x: x[1])
-            return sorted_diff
-
-        def mergable(seta: set, setb: set):
-            l = revolving_sort(list(seta.union(setb)), len(self.sectors))
-            for idx in range(1, len(l)):
-                prev, curr = l[idx - 1][1], l[idx][1]
-                if abs(curr - prev) > 1:
-                    return False
-            return True
-
         candidate_valleys: list[set[int]] = []
         for valleyi in valleys:
             for valleyj in valleys:
-                if len(valleyi.intersection(valleyj)) > 0 or mergable(valleyi, valleyj):
+                if len(valleyi.intersection(valleyj)) > 0 or VFH.mergable(
+                    valleyi, valleyj, mod
+                ):
                     candidate_valleys.append(valleyi.union(valleyj))
         for valleyi in valleys:
             for valleyj in valleys:
-                if len(valleyi.intersection(valleyj)) > 0 or mergable(valleyi, valleyj):
+                if len(valleyi.intersection(valleyj)) > 0 or VFH.mergable(
+                    valleyi, valleyj, mod
+                ):
                     candidate_valleys.append(valleyi.union(valleyj))
 
         candidates_to_remove = []
         for i, valleyi in enumerate(candidate_valleys):
-            if len(valleyi) < self.smax:
-                candidates_to_remove.append(valleyi)
-                continue
-            for j, valleyj in enumerate(candidate_valleys[:i]):
+            # if len(valleyi) < self.smax:
+            #     candidates_to_remove.append(valleyi)
+            #     continue
+            for _, valleyj in enumerate(candidate_valleys[:i]):
                 if valleyi.issuperset(valleyj) and valleyi.difference(valleyj):
                     candidates_to_remove.append(valleyj)
                     continue
         for to_remove in candidates_to_remove:
-            try: candidate_valleys.remove(to_remove)
-            except: pass
+            try:
+                candidate_valleys.remove(to_remove)
+            except:
+                pass
 
         unique = []
         for valley in candidate_valleys:
             if valley not in unique:
                 unique.append(valley)
         candidate_valleys = unique
+        return valleys, candidate_valleys
+
+    def get_next_direction(self):
+        sectors_extrema = argrelextrema(
+            np.array(self.sectors), lambda x, _: x < self.threshold
+        )[0]
+        all_valleys, candidate_valleys = VFH.merge_mod_extremas(sectors_extrema, len(self.sectors))
 
         goal_degrees = math.degrees(self.get_rotation(self.goal, self.heading))
         if goal_degrees < 0:
@@ -188,33 +201,44 @@ class VFH:
             )
         if not candidate_sectors:
             return 0
-        target_valley_idx, target_sector_idx_in_valley, _ = min(
-            candidate_sectors, key=lambda c: c[2]
-        )
-        selected_valley = list(candidate_valleys[target_valley_idx])
-        theta_sector_idx_range = (
-            range(
-                target_sector_idx_in_valley - self.smax + 1,
-                target_sector_idx_in_valley + 1,
+        selected_valley_idx, near_border, _ = min(candidate_sectors, key=lambda c: c[2])
+        selected_valley = list(candidate_valleys[selected_valley_idx])
+        if len(selected_valley) > self.smax:
+            near_border_far_border_idx_range = (
+                range(
+                    near_border - self.smax + 1,
+                    near_border + 1,
+                )
+                if near_border + self.smax >= len(selected_valley)  # gt or gteq?
+                else range(
+                    near_border,
+                    near_border + self.smax,  # + 1?
+                )
             )
-            if target_sector_idx_in_valley + self.smax
-            >= len(selected_valley)  # gt or gteq?
-            else range(
-                target_sector_idx_in_valley,
-                target_sector_idx_in_valley + self.smax,  # + 1?
-            )
+        else:
+            near_border_far_border_idx_range = range(0, len(selected_valley))
+        near_far_border_range = list(map(lambda idx: selected_valley[idx], near_border_far_border_idx_range))  # type: ignore
+        revolving_sorted_near_far_border_range = VFH.revolving_sort(
+            near_far_border_range, len(self.sectors)
         )
-        theta_sector_range = list(map(lambda idx: selected_valley[idx], theta_sector_idx_range))  # type: ignore
-        diff = [
-            (i, abs(x - len(self.sectors)) if x > len(self.sectors) / 2 else x)
-            for i, x in enumerate(np.mod(theta_sector_range, len(self.sectors)))
-        ]
-        sorted_diff = sorted(diff, key=lambda x: x[1])
-        theta_median = theta_sector_range[sorted_diff[len(sorted_diff) // 2][0]]
+        theta = near_far_border_range[
+            revolving_sorted_near_far_border_range[
+                len(revolving_sorted_near_far_border_range) // 2
+            ][0]
+        ] * self.alpha
         rospy.loginfo(
-            f"\nself.heading {math.degrees(self.heading)}\ngoal_degrees {goal_degrees}\ngoal_sector {goal_sector}\nvalleys{valleys}\ncandidate_valleys {candidate_valleys}\ncandidate_sectors {candidate_sectors}\nselected_valley {selected_valley}\ntarget_sector {selected_valley[target_sector_idx_in_valley]}\ntheta_median {theta_median}\n"  # \nlaser_data {self.laser_data.ranges}"
-        )
-        return theta_median
+            f"\
+            \ncurrently at ({self.position.x:.2}, {self.position.y:.2}) \
+            \nself.heading {math.degrees(self.heading):.3}\
+            \ngoal_degrees {goal_degrees:.3}\
+            \ngoal_sector {goal_sector}\
+            \nall_valleys {all_valleys}\
+            \ncandidate_valleys {candidate_valleys}\
+            \ncandidate_sectors {candidate_sectors}\
+            \nselected_valley {selected_valley}\
+            \ntarget_sector {selected_valley[near_border]}\
+            \ntheta {theta}\n")
+        return theta
 
     def run(self):
         rospy.loginfo("starting robot...")
