@@ -5,6 +5,7 @@ import math
 import numpy as np
 from scipy.signal import argrelextrema
 from typing import Iterable
+from ordered_set import OrderedSet
 
 import rospy
 from geometry_msgs.msg import Twist, Point, PoseStamped
@@ -20,19 +21,24 @@ class VFH:
         self.heading = 0
         self.path = Path()
 
-        self.goal = Point()
-        self.goal.x = 7
-        self.goal.y = 13
-        self.goals = [Point(4, 0), ]
+        self.goal = Point(0, 0, 0)
+        self.goals = [
+            Point(4.5, 0, 0), Point(3.5, 4.5, 0), Point(2.5, 1, 0), Point(1, 1, 0), Point(0, 0, 0), Point(3.5, 6, 0.5), Point(6, 6, 0), Point(7, 3, 0), Point(8, 7, 0), Point(13, 7, 0)
+        ]
 
         self.dt = 0.005
         rate = 1 / self.dt
 
-        self.angular_speed_pid = PID(1, 0, 0, self.dt)
-        self.linear_velocity = 0.15
+        self.angular_speed_pid = PID(0.2, 0, 0, self.dt)
+        self.linear_velocity = 0.1
+        self.max_velocity = 1
+        self.h_m = 1
+        self.get_linear_velocity_factor = (
+            lambda: self.max_velocity * (1 - min(self.sectors[0], self.h_m)) / self.h_m
+        )
 
-        self.a = 2
-        self.b = 0.55
+        self.a = 1
+        self.b = 0.25
         self.alpha = 5  # number of degrees that each sector occupies
         self.threshold = 1
         self.smoothing_proximity = 2
@@ -116,44 +122,36 @@ class VFH:
         return sorted_diff
 
     @staticmethod
-    def mergable(seta: set, setb: set, mod: int):
-        l = VFH.revolving_sort(list(seta.union(setb)), mod)
-        for idx in range(1, len(l)):
-            prev, curr = l[idx - 1][1], l[idx][1]
-            if abs(curr - prev) > 1:
-                return False
-        return True
+    def mergable(seta: OrderedSet, setb: OrderedSet, mod: int):
+        if not seta or not setb:
+            return False
+        if np.mod(seta[0] - 1, mod) == setb[-1] or np.mod(seta[-1] + 1, mod) == setb[0]:
+            return True
+        return len(seta.intersection(setb)) > 0
 
     @staticmethod
     def merge_mod_extremas(extremas: np.ndarray, mod: int):
-        valleys: list[set[int]] = []
-        current_valley_buffer = set()
+        valleys: list[OrderedSet[int]] = []
+        current_valley_buffer = OrderedSet([])
         for idx in range(-len(extremas) + 1, len(extremas)):
             if extremas[idx] - extremas[idx - 1] == 1:
                 current_valley_buffer.add(extremas[idx - 1])
                 current_valley_buffer.add(extremas[idx])
             else:
                 valleys.append(current_valley_buffer)
-                current_valley_buffer = set()
-        candidate_valleys: list[set[int]] = []
+                current_valley_buffer = OrderedSet([])
+        candidate_valleys: list[OrderedSet[int]] = []
         for valleyi in valleys:
             for valleyj in valleys:
-                if len(valleyi.intersection(valleyj)) > 0 or VFH.mergable(
-                    valleyi, valleyj, mod
-                ):
+                if VFH.mergable(valleyi, valleyj, mod):
                     candidate_valleys.append(valleyi.union(valleyj))
         for valleyi in valleys:
             for valleyj in valleys:
-                if len(valleyi.intersection(valleyj)) > 0 or VFH.mergable(
-                    valleyi, valleyj, mod
-                ):
+                if VFH.mergable(valleyi, valleyj, mod):
                     candidate_valleys.append(valleyi.union(valleyj))
 
         candidates_to_remove = []
         for i, valleyi in enumerate(candidate_valleys):
-            # if len(valleyi) < self.smax:
-            #     candidates_to_remove.append(valleyi)
-            #     continue
             for _, valleyj in enumerate(candidate_valleys[:i]):
                 if valleyi.issuperset(valleyj) and valleyi.difference(valleyj):
                     candidates_to_remove.append(valleyj)
@@ -171,23 +169,15 @@ class VFH:
         candidate_valleys = unique
         return valleys, candidate_valleys
 
-    def get_next_direction(self):
-        sectors_extrema = argrelextrema(
-            np.array(self.sectors), lambda x, _: x < self.threshold
-        )[0]
-        all_valleys, candidate_valleys = VFH.merge_mod_extremas(sectors_extrema, len(self.sectors))
-
-        goal_degrees = math.degrees(self.get_rotation(self.goal, self.heading))
-        if goal_degrees < 0:
-            goal_degrees += 360
-        goal_sector = goal_degrees // self.alpha
+    @staticmethod
+    def get_best_sectors_in_valley_wrt_goal(valleys: list, goal_sector: int, mod: int):
         candidate_sectors: list[tuple[int, np.intp, float]] = []
-        for valley_idx, valley in enumerate(candidate_valleys):
+        for valley_idx, valley in enumerate(valleys):
             valley_sectors_distance_to_target = abs(
                 np.array(list(valley)) - goal_sector
             )
             min_sector_distance_idx = np.argmin(
-                np.mod(valley_sectors_distance_to_target, len(self.sectors))
+                np.mod(valley_sectors_distance_to_target, mod)
             )
             candidate_sectors.append(
                 (
@@ -195,12 +185,29 @@ class VFH:
                     min_sector_distance_idx,
                     np.mod(
                         valley_sectors_distance_to_target[min_sector_distance_idx],
-                        len(self.sectors),
+                        mod,
                     ),
                 )
             )
+        return candidate_sectors
+
+    def get_next_direction(self):
+        sectors_extrema = argrelextrema(
+            np.array(self.sectors), lambda x, _: x < self.threshold
+        )[0]
+        all_valleys, candidate_valleys = VFH.merge_mod_extremas(
+            sectors_extrema, len(self.sectors)
+        )
+
+        goal_degrees = math.degrees(self.get_rotation(self.goal, self.heading))
+        if goal_degrees < 0:
+            goal_degrees += 360
+        goal_sector = int(goal_degrees // self.alpha)
+
+        candidate_sectors = VFH.get_best_sectors_in_valley_wrt_goal(candidate_valleys, goal_sector, mod=len(self.sectors))
         if not candidate_sectors:
             return 0
+
         selected_valley_idx, near_border, _ = min(candidate_sectors, key=lambda c: c[2])
         selected_valley = list(candidate_valleys[selected_valley_idx])
         if len(selected_valley) > self.smax:
@@ -221,23 +228,26 @@ class VFH:
         revolving_sorted_near_far_border_range = VFH.revolving_sort(
             near_far_border_range, len(self.sectors)
         )
-        theta = near_far_border_range[
-            revolving_sorted_near_far_border_range[
-                len(revolving_sorted_near_far_border_range) // 2
-            ][0]
-        ] * self.alpha
+        theta = (
+            near_far_border_range[
+                revolving_sorted_near_far_border_range[
+                    len(revolving_sorted_near_far_border_range) // 2
+                ][0]
+            ]
+            * self.alpha
+        )
         rospy.loginfo(
             f"\
             \ncurrently at ({self.position.x:.2}, {self.position.y:.2}) \
             \nself.heading {math.degrees(self.heading):.3}\
-            \ngoal_degrees {goal_degrees:.3}\
             \ngoal_sector {goal_sector}\
             \nall_valleys {all_valleys}\
             \ncandidate_valleys {candidate_valleys}\
             \ncandidate_sectors {candidate_sectors}\
             \nselected_valley {selected_valley}\
             \ntarget_sector {selected_valley[near_border]}\
-            \ntheta {theta}\n")
+            \ntheta {theta}\n"
+        )
         return theta
 
     def run(self):
@@ -253,7 +263,10 @@ class VFH:
                 error += 2 * math.pi
 
             twist = Twist()
-            twist.linear.x = self.linear_velocity * (math.pi - abs(error)) / math.pi
+            max_rotation = math.pi
+            v = self.get_linear_velocity_factor() * (1 - abs(error) / max_rotation)
+            # twist.linear.x = self.linear_velocity * (math.pi - abs(error)) / math.pi
+            twist.linear.x = v + self.linear_velocity
             twist.angular.z = self.angular_speed_pid.apply(error)
             rospy.loginfo(f"error {error} angular.z {twist.angular.z}")
             self.cmd_vel.publish(twist)
