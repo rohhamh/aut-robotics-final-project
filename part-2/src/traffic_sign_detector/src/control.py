@@ -24,7 +24,7 @@ import numpy as np
 from enum import Enum
 from std_msgs.msg import Float64, UInt8
 from geometry_msgs.msg import Twist
-from time import time
+import datetime
 
 class ControlLane():
     def __init__(self):
@@ -39,9 +39,8 @@ class ControlLane():
         self.sub_parking = rospy.Subscriber('/detect/parking_sign', UInt8, self.parking_cb, queue_size = 1)
         self.is_parking = 0
 
-        self.sleep_until = time()
-        self.ignore_sleep_until = time()
-        self.time = time()
+        self.sleep_until = datetime.datetime.now()
+        self.ignore_sleep_until = datetime.datetime.now()
 
         self.lastError = 0
         self.MAX_VEL = 0.1
@@ -88,13 +87,17 @@ class ControlLane():
             twist.linear.x /= 2
             rospy.loginfo('Slowing down for construction/intersection')
         elif self.is_parking:
-            now = time()
-            if now < self.sleep_until:
-                return
-            elif now - self.time < self.ignore_sleep_dur:
-                pass
+            now = datetime.datetime.now()
+            rospy.loginfo(f'{now} {self.ignore_sleep_until}')
+            if now > self.ignore_sleep_until:
+                rospy.loginfo(f'parking!')
+                if now < self.sleep_until:
+                    self.ignore_sleep_until = self.sleep_until + datetime.timedelta(seconds=5)
+                    return
+                else:
+                    self.sleep_until = now + datetime.timedelta(seconds=3)
+                    return
         
-        self.time = time()
         self.pub_cmd_vel.publish(twist)
 
     def fnShutDown(self):
