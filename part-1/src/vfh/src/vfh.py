@@ -21,14 +21,14 @@ class VFH:
         self.heading = 0
         self.path = Path()
 
-        self.goal = Point(2.6, 1.5, 0)
+        self.goal = Point(4.5, 0, 0)
         self.goals = [
-            # Point(3.5, 4.5, 0),
-            # Point(2.5, 1.2, 0),
-            Point(.5, 2, 0),
+            Point(3, 4.5, 0),
+            Point(2.5, 1.2, 0),
+            Point(.5, 1.5, 0),
             Point(3.5, 6, 0.0),
             Point(5.5, 5, 0),
-            Point(6.5, 3, 0),
+            Point(6.7, 2.6, 0),
             Point(8, 6, 0),
             Point(13, 7, 0),
         ]
@@ -37,11 +37,11 @@ class VFH:
         rate = 1 / self.dt
 
         self.angular_speed_pid = PID(0.4, 0, 0, self.dt)
-        self.min_linear_velocity = 0.1
-        self.max_velocity = 1
-        self.h_m = 1
+        self.min_linear_velocity = 0.05
+        self.max_velocity = .75
+        self.h_m = 2.5
         self.get_linear_velocity_factor = (
-            lambda: self.max_velocity * (1 - min(self.sectors[0], self.h_m)) / self.h_m
+            lambda: self.max_velocity * (1 - min(self.sectors[0], self.h_m) / self.h_m)
         )
         self.epsilon = .5
         self.max_rotation = 2 * math.pi
@@ -49,9 +49,9 @@ class VFH:
         self.a = 1
         self.b = 0.25
         self.alpha = 5  # number of degrees that each sector occupies
-        self.threshold = 2.6
+        self.threshold = 2.95
         self.smoothing_proximity = 2
-        self.smax = 8
+        self.smax = 12
 
         self.sectors: list[float] = [0] * (360 // self.alpha)
 
@@ -131,12 +131,24 @@ class VFH:
         return sorted_diff
 
     @staticmethod
-    def mergable(seta: OrderedSet, setb: OrderedSet, mod: int):
+    def mergable(seta: OrderedSet, setb: OrderedSet, mod: int) -> tuple[bool, list[OrderedSet]]:
         if not seta or not setb:
-            return False
-        if np.mod(seta[0] - 1, mod) == setb[-1] or np.mod(seta[-1] + 1, mod) == setb[0]:
-            return True
-        return len(seta.intersection(setb)) > 0
+            return False, []
+
+        if np.mod(seta[0] - 1, mod) == setb[-1]:
+            return True, [setb, seta]
+
+        if np.mod(seta[-1] + 1, mod) == setb[0]:
+            return True, [seta, setb]
+
+        intersection = seta.intersection(setb)
+        if len(intersection) <= 0:
+            return False, []
+        
+        if intersection[0] == seta[0]:
+            return True, [setb, seta]
+        else:
+            return True, [seta, setb]
 
     @staticmethod
     def merge_mod_extremas(extremas: np.ndarray, mod: int):
@@ -152,12 +164,14 @@ class VFH:
         candidate_valleys: list[OrderedSet[int]] = []
         for valleyi in valleys:
             for valleyj in valleys:
-                if VFH.mergable(valleyi, valleyj, mod):
-                    candidate_valleys.append(valleyi.union(valleyj))
+                mergable, valleys_in_order = VFH.mergable(valleyi, valleyj, mod)
+                if mergable and valleys_in_order:
+                    candidate_valleys.append(valleys_in_order[0].union(valleys_in_order[1]))
         for valleyi in valleys:
             for valleyj in valleys:
-                if VFH.mergable(valleyi, valleyj, mod):
-                    candidate_valleys.append(valleyi.union(valleyj))
+                mergable, valleys_in_order = VFH.mergable(valleyi, valleyj, mod)
+                if mergable and valleys_in_order:
+                    candidate_valleys.append(valleys_in_order[0].union(valleys_in_order[1]))
 
         candidates_to_remove = []
         for i, valleyi in enumerate(candidate_valleys):
@@ -255,7 +269,7 @@ class VFH:
             \nselected_valley {selected_valley}\
             \ntarget_sector {selected_valley[near_border]}\
             \ntheta {theta}\n"
-            # \nunmerged_valleys {unmerged_valleys}
+            # \nunmerged_valleys {unmerged_valleys}"
         )
         return theta
 
@@ -284,10 +298,12 @@ class VFH:
                 error += 2 * math.pi
 
             twist = Twist()
-            v = self.get_linear_velocity_factor() * (1 - abs(error) / self.max_rotation)
+            velocity_factor = self.get_linear_velocity_factor() 
+            rotation_factor = (1 - abs(error) / self.max_rotation)
+            v = velocity_factor * rotation_factor
             twist.linear.x = v + self.min_linear_velocity
             twist.angular.z = self.angular_speed_pid.apply(error)
-            rospy.loginfo(f"error {error} angular.z {twist.angular.z}")
+            rospy.loginfo(f"error {error} angular.z {twist.angular.z} vfactor {velocity_factor:.2F} rotfactor {rotation_factor:.2F}")
             self.cmd_vel.publish(twist)
             self.r.sleep()
 
