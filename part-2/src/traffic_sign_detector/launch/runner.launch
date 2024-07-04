@@ -1,0 +1,28 @@
+<launch>
+  <!-- launch turtlebot3_autorace_detect_lane.launch before launch this file -->
+
+  <!-- lane control -->
+  <node pkg="traffic_sign_detector" type="control.py" name="control" output="screen">
+    <remap from="/control/lane" to="/detect/lane" />
+    <remap from="/control/cmd_vel" to="/cmd_vel" />
+  </node>
+
+  <node pkg="traffic_sign_detector" type="construction.py" name="detect_construction_sign" output="screen">
+    <remap from="/detect/image_input" to="/camera/image_compensated" />
+    <remap from="/detect/image_input/compressed" to="/camera/image_compensated/compressed" />
+    <remap from="/detect/image_output" to="/detect/image_traffic_sign" />
+    <remap from="/detect/image_output/compressed" to="/detect/image_traffic_sign/compressed" />
+  </node>
+  <node pkg="traffic_sign_detector" type="intersection.py" name="detect_intersection_sign" output="screen">
+    <remap from="/detect/image_input" to="/camera/image_compensated" />
+    <remap from="/detect/image_input/compressed" to="/camera/image_compensated/compressed" />
+    <remap from="/detect/image_output" to="/detect/image_traffic_sign" />
+    <remap from="/detect/image_output/compressed" to="/detect/image_traffic_sign/compressed" />
+  </node>
+  <node pkg="traffic_sign_detector" type="parking.py" name="detect_parking_sign" output="screen">
+    <remap from="/detect/image_input" to="/camera/image_compensated" />
+    <remap from="/detect/image_input/compressed" to="/camera/image_compensated/compressed" />
+    <remap from="/detect/image_output" to="/detect/image_traffic_sign" />
+    <remap from="/detect/image_output/compressed" to="/detect/image_traffic_sign/compressed" />
+  </node>
+</launch>
