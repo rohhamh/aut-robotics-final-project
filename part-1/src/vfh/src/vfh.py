@@ -21,28 +21,37 @@ class VFH:
         self.heading = 0
         self.path = Path()
 
-        self.goal = Point(0, 0, 0)
+        self.goal = Point(2.6, 1.5, 0)
         self.goals = [
-            Point(4.5, 0, 0), Point(3.5, 4.5, 0), Point(2.5, 1, 0), Point(1, 1, 0), Point(0, 0, 0), Point(3.5, 6, 0.5), Point(6, 6, 0), Point(7, 3, 0), Point(8, 7, 0), Point(13, 7, 0)
+            # Point(3.5, 4.5, 0),
+            # Point(2.5, 1.2, 0),
+            Point(.5, 2, 0),
+            Point(3.5, 6, 0.0),
+            Point(5.5, 5, 0),
+            Point(6.5, 3, 0),
+            Point(8, 6, 0),
+            Point(13, 7, 0),
         ]
 
         self.dt = 0.005
         rate = 1 / self.dt
 
-        self.angular_speed_pid = PID(0.2, 0, 0, self.dt)
-        self.linear_velocity = 0.1
+        self.angular_speed_pid = PID(0.4, 0, 0, self.dt)
+        self.min_linear_velocity = 0.1
         self.max_velocity = 1
         self.h_m = 1
         self.get_linear_velocity_factor = (
             lambda: self.max_velocity * (1 - min(self.sectors[0], self.h_m)) / self.h_m
         )
+        self.epsilon = .5
+        self.max_rotation = 2 * math.pi
 
         self.a = 1
         self.b = 0.25
         self.alpha = 5  # number of degrees that each sector occupies
-        self.threshold = 1
+        self.threshold = 2.6
         self.smoothing_proximity = 2
-        self.smax = 6
+        self.smax = 8
 
         self.sectors: list[float] = [0] * (360 // self.alpha)
 
@@ -173,29 +182,26 @@ class VFH:
     def get_best_sectors_in_valley_wrt_goal(valleys: list, goal_sector: int, mod: int):
         candidate_sectors: list[tuple[int, np.intp, float]] = []
         for valley_idx, valley in enumerate(valleys):
-            valley_sectors_distance_to_target = abs(
-                np.array(list(valley)) - goal_sector
-            )
-            min_sector_distance_idx = np.argmin(
-                np.mod(valley_sectors_distance_to_target, mod)
-            )
-            candidate_sectors.append(
-                (
-                    valley_idx,
-                    min_sector_distance_idx,
-                    np.mod(
-                        valley_sectors_distance_to_target[min_sector_distance_idx],
-                        mod,
-                    ),
-                )
-            )
+            valley = np.array(list(valley))
+            a, b = valley - goal_sector, goal_sector - valley
+            moda, modb = np.mod(a, mod), np.mod(b, mod)
+            argmina, argminb = np.argmin(moda), np.argmin(modb)
+            distance_a, distance_b = moda[argmina], modb[argminb]
+            if distance_a < distance_b:
+                min_sector_distance_idx = argmina
+                distance = distance_a
+            else:
+                min_sector_distance_idx = argminb
+                distance = distance_b
+            candidate_sectors.append((valley_idx, min_sector_distance_idx, distance))
         return candidate_sectors
 
     def get_next_direction(self):
+        # print(f'sectors {self.sectors}')
         sectors_extrema = argrelextrema(
             np.array(self.sectors), lambda x, _: x < self.threshold
         )[0]
-        all_valleys, candidate_valleys = VFH.merge_mod_extremas(
+        unmerged_valleys, candidate_valleys = VFH.merge_mod_extremas(
             sectors_extrema, len(self.sectors)
         )
 
@@ -204,7 +210,9 @@ class VFH:
             goal_degrees += 360
         goal_sector = int(goal_degrees // self.alpha)
 
-        candidate_sectors = VFH.get_best_sectors_in_valley_wrt_goal(candidate_valleys, goal_sector, mod=len(self.sectors))
+        candidate_sectors = VFH.get_best_sectors_in_valley_wrt_goal(
+            candidate_valleys, goal_sector, mod=len(self.sectors)
+        )
         if not candidate_sectors:
             return 0
 
@@ -239,20 +247,33 @@ class VFH:
         rospy.loginfo(
             f"\
             \ncurrently at ({self.position.x:.2}, {self.position.y:.2}) \
-            \nself.heading {math.degrees(self.heading):.3}\
+            \ngoal at ({self.goal.x:.2F}, {self.goal.y:.2F}) \
+            \nself.heading {math.degrees(self.heading):.2F}\
             \ngoal_sector {goal_sector}\
-            \nall_valleys {all_valleys}\
             \ncandidate_valleys {candidate_valleys}\
             \ncandidate_sectors {candidate_sectors}\
             \nselected_valley {selected_valley}\
             \ntarget_sector {selected_valley[near_border]}\
             \ntheta {theta}\n"
+            # \nunmerged_valleys {unmerged_valleys}
         )
         return theta
+
+    @staticmethod
+    def get_distance(s: Point, f: Point) -> float:
+        return np.sqrt((s.x - f.x) ** 2 + (s.y - f.y) ** 2)
 
     def run(self):
         rospy.loginfo("starting robot...")
         while not rospy.is_shutdown():
+            if VFH.get_distance(self.position, self.goal) < self.epsilon:
+                if not self.goals:
+                    rospy.loginfo("reached final goal")
+                    return
+                self.goal = self.goals[0]
+                self.goals = self.goals[1:]
+                rospy.loginfo("got next goal at (%s, %s)", self.goal.x, self.goal.y)
+
             rospy.wait_for_message("/scan", LaserScan)
             self.update_sectors(self.laser_data)
             next_dir_degrees = self.get_next_direction()
@@ -263,10 +284,8 @@ class VFH:
                 error += 2 * math.pi
 
             twist = Twist()
-            max_rotation = math.pi
-            v = self.get_linear_velocity_factor() * (1 - abs(error) / max_rotation)
-            # twist.linear.x = self.linear_velocity * (math.pi - abs(error)) / math.pi
-            twist.linear.x = v + self.linear_velocity
+            v = self.get_linear_velocity_factor() * (1 - abs(error) / self.max_rotation)
+            twist.linear.x = v + self.min_linear_velocity
             twist.angular.z = self.angular_speed_pid.apply(error)
             rospy.loginfo(f"error {error} angular.z {twist.angular.z}")
             self.cmd_vel.publish(twist)
